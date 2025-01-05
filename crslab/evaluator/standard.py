@@ -11,7 +11,7 @@ import os
 import time
 from collections import defaultdict
 
-import fasttext
+from gensim.models import FastText
 from loguru import logger
 from nltk import ngrams
 from torch.utils.tensorboard import SummaryWriter
@@ -58,11 +58,12 @@ class StandardEvaluator(BaseEvaluator):
         build(dpath, resource['file'], resource['version'])
 
         model_file = os.path.join(dpath, f'cc.{language}.300.bin')
-        self.ft = fasttext.load_model(model_file)
+        self.ft = FastText.load_fasttext_format(model_file)
         logger.info(f'[Load {model_file} for embedding metric')
 
     def _get_sent_embedding(self, sent):
-        return [self.ft[token] for token in sent.split()]
+        return [self.ft.wv[token] for token in sent.split()]
+
 
     def rec_evaluate(self, ranks, label):
         for k in [1, 10, 50]:

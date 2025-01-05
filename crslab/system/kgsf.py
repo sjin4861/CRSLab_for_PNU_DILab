@@ -155,7 +155,10 @@ class KGSFSystem(BaseSystem):
         if os.environ["CUDA_VISIBLE_DEVICES"] == '-1':
             self.model.freeze_parameters()
         else:
-            self.model.module.freeze_parameters()
+            if hasattr(self.model, "module"):
+                self.model.module.freeze_parameters()
+            else:
+                self.model.freeze_parameters()
         self.init_optim(self.conv_optim_opt, self.model.parameters())
 
         for epoch in range(self.conv_epoch):
@@ -186,4 +189,97 @@ class KGSFSystem(BaseSystem):
         self.train_conversation()
 
     def interact(self):
-        pass
+        """
+        KGSFSystem 상호작용(inference) 메서드 예시 코드.
+        - 사용자 입력: self.get_input()
+        - 토큰화/엔티티링크: self.tokenize(), self.link()
+        - context 관리: self.update_context()
+        - 추천(rec) + 대화(conv) 단계 순서대로 forward
+        """
+
+        # (1) 대화 인터랙션 초기화
+        self.init_interact()
+        print("=== Start interacting with KGSF ===")
+        self.model.eval()  # 추론 모드
+
+        language = 'en'  # 혹은 self.language
+
+        while not self.finished:
+            user_input = self.get_input(language=language)
+            if self.finished:
+                print("Bye!")
+                break
+
+            # 2) 토큰화 + 엔티티/단어 링크
+            tokens = self.tokenize(user_input, 'nltk')
+            entity_list = self.link(tokens, self.side_data['entity_kg']['entity'])
+            word_list   = self.link(tokens, self.side_data['word_kg']['entity'])
+
+            # 3) vocab 인덱싱
+            token_ids = [self.vocab['tok2ind'].get(t, self.vocab['unk']) for t in tokens]
+            entity_ids = [
+                self.vocab['entity2id'][ent] for ent in entity_list
+                if ent in self.vocab['entity2id']
+            ]
+            movie_ids = [eid for eid in entity_ids if eid in self.item_ids]
+            word_ids = [
+                self.vocab['word2id'][w] for w in word_list
+                if w in self.vocab['word2id']
+            ]
+
+            # 4) context 갱신
+            self.update_context('rec', token_ids=token_ids, entity_ids=entity_ids,
+                                item_ids=movie_ids, word_ids=word_ids)
+            self.update_context('conv', token_ids=token_ids, entity_ids=entity_ids,
+                                item_ids=movie_ids, word_ids=word_ids)
+
+            # (A) 추천 단계
+            context_entities = torch.LongTensor(self.context['rec']['context_entities']).unsqueeze(0).to(self.device)
+            context_words    = torch.LongTensor(self.context['rec']['context_words']).unsqueeze(0).to(self.device)
+            if len(entity_ids) == 0:
+                entity_ids_tensor = torch.zeros(1, dtype=torch.long, device=self.device)
+            else:
+                entity_ids_tensor = torch.LongTensor([entity_ids[0]]).to(self.device)
+
+            # 추론 시 CrossEntropyLoss를 계산할 필요가 없으므로 dummy label
+            movie_ids_tensor = torch.zeros(1, dtype=torch.long, device=self.device)
+
+            batch_rec = [
+                context_entities,
+                context_words,
+                entity_ids_tensor,
+                movie_ids_tensor
+            ]
+
+            with torch.no_grad():
+                # forward()가 (rec_loss, info_loss, rec_scores)를 반환한다!
+                rec_loss, info_loss, rec_scores = self.model.forward(batch_rec, stage='rec', mode='infer')
+
+                # rec_scores is shape (1, n_entity). Now we can do rec_scores.cpu()[0]
+                rec_scores = rec_scores.cpu()[0]
+                rec_scores = rec_scores[self.item_ids]
+                _, rank = torch.topk(rec_scores, 5, dim=-1)
+                recommended_items = [self.item_ids[idx] for idx in rank.tolist()]
+                print("[Recommend]:", recommended_items)
+
+            # (B) 대화 단계
+            context_tokens_list = []
+            for toks in self.context['conv']['context_tokens']:
+                context_tokens_list.extend(toks)
+            if not context_tokens_list:
+                context_tokens_list = [self.vocab['start']]
+
+            context_tokens = torch.LongTensor(context_tokens_list).unsqueeze(0).to(self.device)
+            conv_entities  = torch.LongTensor(self.context['conv']['context_entities']).unsqueeze(0).to(self.device)
+            conv_words     = torch.LongTensor(self.context['conv']['context_words']).unsqueeze(0).to(self.device)
+
+            # 테스트 모드 => dummy response
+            dummy_response = torch.zeros((1, 1), dtype=torch.long, device=self.device)
+            batch_conv = [context_tokens, conv_entities, conv_words, dummy_response]
+
+            with torch.no_grad():
+                # forward()가 test 모드에서는 단일 preds 반환
+                conv_pred = self.model.forward(batch_conv, stage='conv', mode='test')
+                conv_pred = conv_pred.tolist()[0]
+                p_str = ind2txt(conv_pred, self.ind2tok, self.end_token_idx)
+                print(f"[Response]: {p_str}")

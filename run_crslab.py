@@ -11,6 +11,7 @@ import argparse
 import warnings
 
 from crslab.config import Config
+from crslab.quick_start import run_crslab
 
 warnings.filterwarnings('ignore')
 
@@ -37,8 +38,6 @@ if __name__ == '__main__':
                         help='enable tensorboard to monitor train performance')
     args, _ = parser.parse_known_args()
     config = Config(args.config, args.gpu, args.debug)
-
-    from crslab.quick_start import run_crslab
 
     run_crslab(config, args.save_data, args.restore_data, args.save_system, args.restore_system, args.interact,
                args.debug, args.tensorboard)
